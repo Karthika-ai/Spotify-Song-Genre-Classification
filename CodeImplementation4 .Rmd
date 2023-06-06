@@ -1,0 +1,446 @@
+---
+title: "CodeImplementation4"
+author: "Purple Group"
+date: "4/6/2023"
+output: pdf_document
+---
+
+```{r}
+#Importing the required libraries
+library(tidyverse)
+library(ISLR2)
+library(RSpectra)
+library(plotly)
+library(randomForest)
+library(rpart.plot)
+library(tree)
+library(gbm)
+library(gridExtra)
+library(tictoc)
+library(nnet) #for multinomial logistic regression
+library(caret)
+```
+
+# Loading the Data 
+
+```{r}
+# Loading the Dataset
+df<- read.csv("/Users/kat/Documents/SeattleU/Spring 23/Written Homework-4/spotify.csv", header = TRUE, sep = ",")
+```
+
+
+```{r}
+#Find the unique genres in the dataset
+unique(df$genre)
+```
+
+```{r}
+#Column names in the dataframe
+colnames(df)
+```
+
+```{r}
+#Since few songs were categorized in multiple genres in the original dataset. Therefore, songs with distinct genres were considered for the analysis.
+
+df <- df %>%
+  distinct(song_name, .keep_all = TRUE)
+
+```
+
+```{r}
+##Find the count and the names of unique genres in the dataset
+length(unique(df$genre))
+unique(df$genre)
+```
+
+
+# Data Pre-processing
+
+```{r}
+#For observing well separated clusters considered 3 genres
+Spotify <- df%>% filter(genre %in% c("Rap","Dark Trap","Emo"))
+```
+
+```{r}
+#The unique genres in the dataset
+unique(Spotify$genre) 
+```
+
+
+```{r}
+# Considering sample of observations from dataset for each genre. 
+
+# Split the data by genre
+category_splits <- split(Spotify, Spotify$genre)
+
+# Choose a sample(450) of observations from each genre
+category_samples <- lapply(category_splits, function(category_subset) {
+  sample_n(category_subset, size = 450,replace=FALSE)
+})
+
+# Consolidate the samples into a single dataframe combined_data
+combined_data <- bind_rows(category_samples)
+```
+
+```{r}
+#Cross verify the length of the data
+length(unique(combined_data$song_name))
+```
+
+
+
+# Perform Principal Component Analyis
+
+```{r}
+#Names of songs
+rownames(combined_data) <- combined_data$song_name
+```
+
+
+```{r}
+#Create dataset spotify_df without genre,song_name as we are performing unsupervised learning on unlabelled data.
+spotify_df <- combined_data %>% select(-c(genre,song_name))
+head(spotify_df)
+```
+
+```{r}
+# Compute the principal components using prcomp()
+pr.out <- prcomp(spotify_df, scale=TRUE)
+
+#Fetch the variance captured by each principal component
+pve <- data.frame(var = pr.out$sdev^2/sum(pr.out$sdev^2))
+pve$id <- as.integer(row.names(pve))
+
+#Plot the Proportion variance explained
+#Left plot shows the proportion of information that each individual Principal Component contains, and the right plot shows the collective information represented when each Principal Component is added.
+
+p1 <- ggplot(pve, aes(x=id, y=var)) +
+      geom_point()+
+      geom_line()+
+      labs(x='Principal component r', 
+           y='Proportion variance explained', 
+           title='Each')
+
+p2 <- ggplot(pve, aes(x=id, y=cumsum(var)))+
+      geom_point()+geom_line()+
+      labs(x='Principal Components 1:r',
+           y='',
+           title='Cumulative Sum')
+
+grid.arrange(p1, p2, ncol=2)
+```
+Principal component Analysis was performed for dimensionality reduction of the dataset and to determine the principal components that capture most of the variance in the data. A scree plot, with the number of principal components on the x-axis and the proportion of variance explained on the y-axis, was created, as depicted in Figure 2. It can be observed that at least 8 principal components were required to capture 90% of the variance in the dataset. Therefore, the dataset that included 13 variables was reduced to lower dimensional data which includes 8 principal components. This low-dimensional data was then used for developing machine learning models. 
+
+```{r}
+#Fetch the variance captured by each principal component
+var = pr.out$sdev^2/sum(pr.out$sdev^2)
+var
+```
+
+```{r}
+#Fetch the important variables
+imp_weight <- pr.out$rotation[, 1]
+#Fetch the 7 important variables based on their weights
+sorted_weights <- sort(abs(imp_weight), decreasing = TRUE)
+important_variables <- names(sorted_weights)[1:7]
+important_variables
+```
+
+```{r}
+# Get all the principal components
+principal_components <- pr.out$x
+```
+
+```{r}
+# Choose the  number of components as 8 as 90% of variance is captured when there are 8 components
+components_count <- 8
+
+# Fetch the principal components
+prin_components_final <- principal_components[, 1:components_count]
+```
+
+```{r}
+# Create a lower-dimensional data frame with selected components and genre
+low_dim_spotify_data <- data.frame(prin_components_final)
+```
+
+```{r}
+#Plot the PC1 against PC2 as they capture most of the variance
+Genre <- combined_data$genre
+levels(Genre) <- c(levels(Genre))
+low_dim_spotify_data$Genre <- Genre
+
+fig1 <- plot_ly(data=low_dim_spotify_data)
+fig1 <-  fig1 %>% add_markers(x=~PC1, y = ~PC2, color=~Genre, text = ~paste(Genre), hoverinfo = 'text',)
+fig1 <- fig1 %>% layout(legend=list(title=list(text='Private')))
+fig1
+```
+
+
+The genre Emo, Rap, and Dark Trap are separable from each other in the low-dimensional space. In this plot, we can see that the PCA has captured underlying patterns between the three genres from the variables available. As can be observed, all three genres share some audio characteristics. “Emo” and “Rap” are more tightly clustered because, in comparison to other genres, they have distinct audio characteristics. While certain songs in the “Dark Trap” and “Emo” genre overlap, they overlap showing that they have more comparable audio features. Machine learning models have a hard time predicting the differences between Emo and Rap due to the similarity of the features. 
+
+
+
+#Perform Kmeans on the low dimensionality data from PCA
+
+```{r}
+set.seed(2023)
+tic()
+#Specify number of clusters as 3 and number of iterations as 30
+kmeans_pca <- kmeans(select(low_dim_spotify_data, -c(Genre)),centers = 3, nstart = 30)
+low_dim_spotify_data$clusters = as.factor(kmeans_pca$cluster)
+toc()
+```
+
+```{r}
+#Plot the PC1 against PC2 as they capture most of the variance
+ggplot(low_dim_spotify_data, aes(x=PC1, y=PC2, color=clusters, shape= Genre)) + geom_point()
+```
+
+
+```{r}
+low_dim_spotify_data$pcalabels = ifelse(low_dim_spotify_data$clusters == 3, 'Dark Trap',
+            ifelse(low_dim_spotify_data$clusters == 2, 'Emo',
+                           'Rap' ))
+low_dim_spotify_data$different = as.factor(ifelse(low_dim_spotify_data$pcalabels == low_dim_spotify_data$Genre, 0, 1))
+```
+
+
+```{r}
+#Plot to get the genres of the songs that differ from the actual song genre
+ggplot(low_dim_spotify_data, aes(x=PC1, y=PC2, color=Genre, alpha=different)) + geom_point()
+
+sum(low_dim_spotify_data$different==1)/length(low_dim_spotify_data$different)
+```
+
+The genre Emo, Rap, and Dark Trap are separable from each other in the low-dimensional space. In this plot, we can see that the PCA has captured underlying patterns between the three genres from the variables available. As can be observed, all three genres share some audio characteristics. “Emo” and “Rap” are more tightly clustered because, in comparison to other genres, they have distinct audio characteristics. While certain songs in the “Dark Trap” and “Emo” genre overlap, they overlap showing that they have more comparable audio features. Machine learning models have a hard time predicting the differences between Emo and Rap due to the similarity of the features. 
+
+
+
+```{r}
+table(low_dim_spotify_data$Genre)
+```
+
+```{r}
+twss<- kmeans_pca$tot.withinss
+cat("Total within-group sum of squares is ", twss)
+```
+
+
+
+#Hirearchial clustering
+
+```{r}
+# Set the desired sample size
+set.seed(2)
+sample_size <- 100
+
+# Randomly select observations
+subset_data <- low_dim_spotify_data[sample(nrow(low_dim_spotify_data), sample_size), ]
+```
+
+```{r}
+#Create dataset dendro_data without genre,song_name as we are performing unsupervised learning on unlabelled data.
+dendro_data<-subset_data %>% select(-c(Genre))
+```
+
+
+```{r warning=FALSE}
+#Perform hierarchical clustering with complete,average, single and ward linkage
+hc.complete <- hclust(dist(dendro_data), method = "complete")
+hc.average <- hclust(dist(dendro_data), method = "average")
+hc.single <- hclust(dist(dendro_data), method = "single")
+hc.ward <- hclust(dist(dendro_data), method = "ward.D2")
+```
+
+```{r}
+#Plot the dendrograms
+plot(hc.complete, hang = -1, main = "Complete Linkage",
+    xlab = "", sub = "", cex = .4)
+plot(hc.average, hang = -1, main = "Average Linkage",
+    xlab = "", sub = "", cex = .4)
+plot(hc.single, hang = -1, main = "Single Linkage",
+    xlab = "", sub = "", cex = .4)
+plot(hc.ward, hang = -1, main = "Ward Linkage",
+    xlab = "", sub = "", cex = .4)
+```
+
+```{r}
+#Plot the dendrogram with complete linkage with the number of clusters as 3
+plot(hc.complete, hang = -1,main = "Hierarchical Clustering Dendrogram", xlab = "", sub = "", cex = .4)
+rect.hclust(hc.complete, 3, border = 3)
+```
+
+
+```{r}
+#Cut the dendrogram to have 3 clusters
+dendro_cluster1 <- as.factor(cutree(hc.complete, 3))
+```
+
+```{r}
+# Create a data frame with the song names and their corresponding clusters
+clustered_spotify <- data.frame(genre_name = row.names(subset_data), Cluster = dendro_cluster1)
+
+# Print the songs in each cluster
+for (i in 1:3) {
+  cat("Cluster", i, ":\n")
+  cat(paste(clustered_spotify$genre_name[clustered_spotify$Cluster == i],collapse = ", "), "\n\n")
+}
+```
+
+```{r}
+#Plot the PC1 against PC2 and observe the clusters
+ggplot(dendro_data, aes(x=PC1, y=PC2, color=dendro_cluster1)) + 
+scale_color_discrete(name ="Cluster") + geom_point()
+```
+
+Complete Linkage with a random sample of 100 songs looked more balanced in shape compared to other linkage methods for this data, therefore it is considered for further analysis. The dendrogram with complete linkage was cut by specifying the number of clusters as 3. As shown in Figure 4, well-separated clusters were observed by plotting the primary principal component against the secondary principal component. This groups the songs with similar audio features into one cluster. It can be observed that for the random sample, a greater number of songs are grouped under cluster 1 compared to other clusters. 
+
+```{r}
+# Evaluate the clustering result
+Actual <- subset_data$Genre 
+table(dendro_cluster1, Actual)
+```
+
+
+
+# MACHINE LEARNING MODELS
+
+# Random Forest model using the low dimensional data from PCA
+
+```{r}
+#Create dataset for random forest model without clusters,pcalabels,different
+rf_data <- low_dim_spotify_data %>% select(-c(clusters,pcalabels,different))
+```
+
+```{r}
+#As we were solving a classification problem, the response variable was converted to a factor. 
+rf_data$Genre <- as.factor(rf_data$Genre)
+```
+
+
+```{r}
+#Split the data into train and test by considering 70% of data as training data and reserving the remaining 30% of data as test data
+set.seed(5)
+train <- sample(1:nrow(rf_data), nrow(rf_data)*0.7) 
+rf.train <- rf_data[train,]
+rf.test <- rf_data[-train,]
+```
+
+
+```{r}
+npredictors= length(rf.train)
+set.seed(5)
+tic()
+# Fit the Random Forest model
+rf_model <- randomForest(Genre ~ ., data = rf.train, mtry = sqrt(npredictors), importance = TRUE, ntree = 100)
+toc()
+```
+
+
+```{r}
+#Plot the variables based on their importance
+importance(rf_model)
+varImpPlot(rf_model)
+```
+
+
+
+```{r}
+#Predicting the model on test data
+genre.pred <- predict(rf_model, rf.test,type = "class")
+Predicted<-genre.pred
+Actual<-rf.test$Genre
+table(Actual,Predicted)
+errorrate<- mean(Actual!=Predicted)
+cat("Test error rate for genre classification using random forest is ", errorrate)
+
+```
+
+```{r}
+accuracy<- mean(Actual==Predicted)
+cat("Accuracy for genre classification using random forest is ", accuracy)
+```
+
+```{r}
+# Create a confusion matrix
+confusion_matrix <- confusionMatrix(Predicted, Actual)
+
+# Plot the confusion matrix
+ggplot(data = as.data.frame(confusion_matrix$table),
+       aes(x = Prediction, y = Reference, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq)) +
+  scale_fill_gradient(low = "lightblue", high = "steelblue")
+```
+
+The random forest model was trained and evaluated for multiclass classification to predict music genres. This model was developed by considering 100 trees and the number of predictors was equal to the square root of predictors. This model has performed with an accuracy of 83% on the test data. The confusion matrix for the predictions on the test data is as shown below. The Rap, Emo, and Dark Trap genres were correctly predicted 80%, 93%, and 77% of the time respectively. 
+
+
+# Logistic Regression using the low dimensional data from PCA
+
+```{r}
+#Create dataset for random forest model without clusters,pcalabels,different
+logistic_data <- low_dim_spotify_data %>% select(-c(clusters,pcalabels,different))
+```
+
+```{r}
+#As we were solving a classification problem, the response variable was converted to a factor. 
+logistic_data$Genre <- as.factor(logistic_data$Genre)
+```
+
+```{r}
+#Split the data into train and test by considering 70% of data as training data and reserving the remaining 30% of data as test data
+
+set.seed(5)
+train <- sample(1:nrow(logistic_data), nrow(logistic_data)*0.7) 
+logistic.train <- logistic_data[train,]
+logistic.test <- logistic_data[-train,]
+```
+
+
+```{r}
+set.seed(5)
+tic()
+# Fit the multinomial logistic regression
+multi_model <- multinom(Genre ~ ., data = logistic.train)
+summary(multi_model)
+toc()
+```
+
+
+```{r}
+# Make predictions on the test data
+predictions <- predict(multi_model, newdata = logistic.test, type = "class")
+```
+
+
+```{r}
+#Predicting the model on test data
+predictions <- predict(multi_model, logistic.test,type = "class")
+Predicted<-predictions
+Actual<-logistic.test$Genre
+table(Actual,Predicted)
+errorrate<- mean(Actual!=Predicted)
+cat("Test error rate for genre classification using logistic regression is ", errorrate)
+
+```
+
+```{r}
+accuracy<- mean(Actual==Predicted)
+cat("Accuracy for genre classification using logistic regression is ", accuracy)
+```
+
+```{r}
+# Create a confusion matrix
+confusion_matrix <- confusionMatrix(Predicted, Actual)
+
+# Plot the confusion matrix
+ggplot(data = as.data.frame(confusion_matrix$table),
+       aes(x = Prediction, y = Reference, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq)) +
+  scale_fill_gradient(low = "lightblue", high = "steelblue")
+```
+
+The low-dimensional data from PCA was utilized to train a logistic regression model to predict the genre of the songs. Figure.5 depicts this model's confusion matrix. On the test data, this model has predicted an accuracy of 77%. For Rap and Emo songs, the genre was correctly predicted nearly 80 percent of the time. And the performance rate for predicting the “Dark Trap” songs was 65%. It can be observed that the model performs moderately for the “Dark Trap” classification.   
